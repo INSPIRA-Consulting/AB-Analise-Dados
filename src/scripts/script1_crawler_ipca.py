@@ -264,53 +264,73 @@ def processar_ipca_completo(bucket_name=None):
     
     logger.info("🚀 Iniciando download e processamento do IPCA...")
 
-try:
-    os.makedirs("ipca-raw", exist_ok=True)
-    response = requests.get(url_ipca)
-    response.raise_for_status()
-    
-    with zipfile.ZipFile(io.BytesIO(response.content)) as pasta_zip:
-        # Listar arquivos no ZIP
-        file_list = pasta_zip.namelist()
-        print(f"Arquivos encontrados no ZIP: {file_list}")
+    try:
+        # Usar /tmp/ no Lambda, diretório local em execução normal
+        if usar_s3:
+            temp_dir = "/tmp/ipca-raw"
+        else:
+            temp_dir = "ipca-raw"
         
-        for file_name in file_list:
-            if file_name.endswith('.xls') or file_name.endswith('.xlsx'):
-                with pasta_zip.open(file_name) as zip_file:
-                    file_content = zip_file.read()
-                
-                workbook = xlrd.open_workbook(file_contents=file_content)
-                print(f"Lendo arquivo: {file_name}")
-                sheet = workbook.sheet_by_index(0)  # Primeira planilha
-                data = []
-                for row in range(sheet.nrows):
-                    data.append([sheet.cell_value(row, col) for col in range(sheet.ncols)])
-                print("Salvando dados em DataFrame pandas...")
-                df_pandas = pd.DataFrame(data)
-                
-                excel_file = "ipca-raw/" + os.path.splitext(file_name)[0] + ".xlsx"
-                df_pandas.to_excel(excel_file, index=False)
-                print(f"Arquivo salvo: {excel_file}")
-
-                # Processar e padronizar dados
-                csv_padronizado = padronizar_dados_ipca(df_pandas, file_name)
-                if csv_padronizado is not None:
-                    # Obter bucket_name de variável de ambiente se disponível
-                    bucket_name = os.environ.get('S3_BUCKET_NAME')
-                    nome_arquivo = os.path.splitext(file_name)[0] + "_padronizado.csv"
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        response = requests.get(url_ipca)
+        response.raise_for_status()
+        
+        with zipfile.ZipFile(io.BytesIO(response.content)) as pasta_zip:
+            # Listar arquivos no ZIP
+            file_list = pasta_zip.namelist()
+            print(f"Arquivos encontrados no ZIP: {file_list}")
+            
+            for file_name in file_list:
+                if file_name.endswith('.xls') or file_name.endswith('.xlsx'):
+                    with pasta_zip.open(file_name) as zip_file:
+                        file_content = zip_file.read()
                     
-                    if bucket_name:
-                        # Salvar no S3
-                        salvar_no_s3(csv_padronizado, nome_arquivo, bucket_name)
-                    else:
-                        # Salvar local como antes
-                        csv_file = "ipca-raw/" + nome_arquivo
-                        csv_padronizado.to_csv(csv_file, index=False, encoding='utf-8')
-                        print(f"CSV padronizado salvo: {csv_file}")
-                
-    print("Download e extração do IPCA concluídos com sucesso!")
-except Exception as e:
-    print(f"Erro ao processar IPCA: {e}")
+                    workbook = xlrd.open_workbook(file_contents=file_content)
+                    print(f"Lendo arquivo: {file_name}")
+                    sheet = workbook.sheet_by_index(0)  # Primeira planilha
+                    data = []
+                    for row in range(sheet.nrows):
+                        data.append([sheet.cell_value(row, col) for col in range(sheet.ncols)])
+                    print("Salvando dados em DataFrame pandas...")
+                    df_pandas = pd.DataFrame(data)
+                    
+                    excel_file = os.path.join(temp_dir, os.path.splitext(file_name)[0] + ".xlsx")
+                    df_pandas.to_excel(excel_file, index=False)
+                    print(f"Arquivo salvo: {excel_file}")
+
+                    # Processar e padronizar dados
+                    csv_padronizado = padronizar_dados_ipca(df_pandas, file_name)
+                    if csv_padronizado is not None:
+                        nome_arquivo = os.path.splitext(file_name)[0] + "_padronizado.csv"
+                        
+                        if usar_s3:
+                            # Salvar no S3
+                            if salvar_no_s3(csv_padronizado, nome_arquivo, bucket_name):
+                                sucessos += 1
+                            else:
+                                erros += 1
+                        else:
+                            # Salvar local como antes
+                            csv_file = os.path.join(temp_dir, nome_arquivo)
+                            csv_padronizado.to_csv(csv_file, index=False, encoding='utf-8')
+                            print(f"CSV padronizado salvo: {csv_file}")
+                            sucessos += 1
+                    
+        print("Download e extração do IPCA concluídos com sucesso!")
+        
+        resultado = {
+            'sucessos': sucessos,
+            'erros': erros,
+            'usando_s3': usar_s3
+        }
+        
+        logger.info(f"🎯 Processamento concluído: {resultado}")
+        return resultado
+
+    except Exception as e:
+        logger.error(f"❌ Erro no processamento: {e}")
+        return {'erro': str(e)}
 
 if __name__ == "__main__":
     # Execução local sem S3
